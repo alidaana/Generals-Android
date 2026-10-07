@@ -334,6 +334,14 @@ static void gxSetupTurnipDriver()
 	setenv("GENERALSX_TURNIP_DRIVER_NAME", DRIVER_NAME, 1);
 	fprintf(stderr, "INFO: Turnip: adrenotools env set (hookLibDir=%s driverDir=%s name=%s)\n",
 	        nativeLibDir, driverDir, DRIVER_NAME);
+
+	// GeneralsX @feature S25 07/10/2026 Adreno 830 (Snapdragon 8 Elite, Galaxy S25):
+	// the A8xx Turnip build renders glitchy frames in GMEM (tiled) mode on A830 —
+	// write page faults, per the driver's release notes — so render in sysmem mode.
+	// Turnip reads TU_DEBUG from the process environment at instance creation, which
+	// happens after this point. overwrite=0: a user-provided TU_DEBUG still wins.
+	setenv("TU_DEBUG", "sysmem", 0);
+	fprintf(stderr, "INFO: Turnip: TU_DEBUG=%s\n", getenv("TU_DEBUG"));
 }
 #endif // __ANDROID__
 

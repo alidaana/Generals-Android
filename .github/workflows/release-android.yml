@@ -104,5 +104,10 @@ jobs:
             --generate-notes \
             --notes "Debug-signed APK for sideloading (arm64, Adreno GPUs — see README).
 
+          **S25 build:** bundles whitebelyash Stable Turnip v2 (Mesa 26.2.3), which adds
+          Adreno 8xx (Snapdragon 8 Elite / Galaxy S25 Ultra's Adreno 830), and renders in
+          Turnip sysmem mode (TU_DEBUG=sysmem). Installs alongside the official APK as
+          \"Generals ZH S25\".
+
           **You need your own Zero Hour game assets** — this APK ships none.
-          Push assets with \`scripts/build/android/push-assets-android.sh\`."
+          Copy them to Internal storage/GeneralsZH (or push with \`scripts/build/android/push-assets-android.sh\`)."
