@@ -4,12 +4,15 @@ name: Release Android APK
 # scripts a dev uses locally (docs/BUILD/ANDROID.md), then:
 #   - on any run: uploads the APK as a workflow artifact
 #   - on an android-v* tag: publishes it as a GitHub Release
+#   - on a push to the s25-adreno8xx branch: publishes it as a GitHub Release too,
+#     tagged android-v0.1.1-s25.<run number> (the release step creates the tag)
 # The APK contains NO game assets — players supply their own Zero Hour data.
 
 on:
   workflow_dispatch:
   push:
     tags: ['android-v*']
+    branches: ['s25-adreno8xx']
 
 permissions:
   contents: write
@@ -23,6 +26,14 @@ jobs:
     timeout-minutes: 300
     steps:
       - uses: actions/checkout@v4
+
+      - name: Release tag
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/android-v* ]]; then
+            echo "RELEASE_TAG=$GITHUB_REF_NAME" >> "$GITHUB_ENV"
+          else
+            echo "RELEASE_TAG=android-v0.1.1-s25.${GITHUB_RUN_NUMBER}" >> "$GITHUB_ENV"
+          fi
 
       # Only the two submodules the Android build needs (references/ holds more).
       # cmake inits fbraz3-dxvk's nested submodules and applies the Android patch itself.
@@ -87,7 +98,7 @@ jobs:
           export VCPKG_ROOT="$HOME/vcpkg"
           ./scripts/build/android/package-android-zh.sh
           cp android/app/build/outputs/apk/debug/app-debug.apk \
-             "GeneralsZH-Android-${GITHUB_REF_NAME//\//-}-debug.apk"
+             "GeneralsZH-Android-${RELEASE_TAG//\//-}-debug.apk"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -95,12 +106,13 @@ jobs:
           path: GeneralsZH-Android-*.apk
 
       - name: Publish GitHub Release
-        if: startsWith(github.ref, 'refs/tags/android-v')
+        if: startsWith(github.ref, 'refs/tags/android-v') || github.ref == 'refs/heads/s25-adreno8xx'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" GeneralsZH-Android-*.apk \
-            --title "Android $GITHUB_REF_NAME" \
+          gh release create "$RELEASE_TAG" GeneralsZH-Android-*.apk \
+            --target "$GITHUB_SHA" \
+            --title "Android $RELEASE_TAG" \
             --generate-notes \
             --notes "Debug-signed APK for sideloading (arm64, Adreno GPUs — see README).
 
