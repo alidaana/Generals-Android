@@ -81,24 +81,57 @@ jobs:
           key: vcpkg-android-${{ hashFiles('vcpkg.json', 'cmake/triplets/arm64-android.cmake') }}
           restore-keys: vcpkg-android-
 
+      # Output is tee'd to ci-logs/ so the failure step below can surface it.
       - name: Build libmain.so + DXVK + Turnip + adrenotools
+        shell: bash
         run: |
+          mkdir -p ci-logs
           export ANDROID_NDK_HOME="$ANDROID_SDK_ROOT/ndk/$NDK_VERSION"
           export VCPKG_ROOT="$HOME/vcpkg"
-          ./scripts/build/android/fetch-turnip.sh
-          ./scripts/build/android/build-adrenotools.sh
-          cmake --preset android-vulkan
-          # dxvk_d3d8_install builds the DXVK external project and copies
-          # libdxvk_d3d8/d3d9.so to the build root where package-android-zh.sh expects them.
-          cmake --build build/android-vulkan --target z_generals dxvk_d3d8_install -j"$(nproc)"
+          {
+            ./scripts/build/android/fetch-turnip.sh
+            ./scripts/build/android/build-adrenotools.sh
+            cmake --preset android-vulkan
+            # dxvk_d3d8_install builds the DXVK external project and copies
+            # libdxvk_d3d8/d3d9.so to the build root where package-android-zh.sh expects them.
+            cmake --build build/android-vulkan --target z_generals dxvk_d3d8_install -j"$(nproc)"
+          } 2>&1 | tee ci-logs/build.log
 
       - name: Package APK
+        shell: bash
         run: |
+          mkdir -p ci-logs
           export ANDROID_NDK_HOME="$ANDROID_SDK_ROOT/ndk/$NDK_VERSION"
           export VCPKG_ROOT="$HOME/vcpkg"
-          ./scripts/build/android/package-android-zh.sh
-          cp android/app/build/outputs/apk/debug/app-debug.apk \
-             "GeneralsZH-Android-${RELEASE_TAG//\//-}-debug.apk"
+          {
+            ./scripts/build/android/package-android-zh.sh
+            cp android/app/build/outputs/apk/debug/app-debug.apk \
+               "GeneralsZH-Android-${RELEASE_TAG//\//-}-debug.apk"
+          } 2>&1 | tee ci-logs/package.log
+
+      # Job logs live in blob storage that some tooling can't reach; surface the
+      # tail of the failing step (plus any vcpkg port logs it points at) as
+      # annotations, which the Checks API serves.
+      - name: Report build errors
+        if: failure()
+        shell: bash
+        run: |
+          log=$(ls -t ci-logs/*.log 2>/dev/null | head -1)
+          [[ -n "$log" ]] || { echo "::error title=no log::no ci-logs/*.log"; exit 0; }
+          {
+            echo "== $log (last 200 lines) =="
+            tail -n 200 "$log"
+            for f in $(grep -oE '/[^ :]*vcpkg[^ :]*\.(log|txt)' "$log" | sort -u | head -4); do
+              [[ -f "$f" ]] && { echo "== $f (last 60 lines) =="; tail -n 60 "$f"; }
+            done
+          } | sed -e 's/\x1b\[[0-9;]*m//g' > ci-logs/diag.txt
+          split -l 45 ci-logs/diag.txt ci-logs/part_
+          n=0
+          for p in ci-logs/part_*; do
+            n=$((n+1)); [[ $n -gt 9 ]] && break
+            msg=$(sed -e 's/%/%25/g' -e 's/\r/%0D/g' "$p" | awk 'BEGIN{ORS="%0A"} {print}')
+            echo "::error title=log part $n::$msg"
+          done
 
       - uses: actions/upload-artifact@v4
         with:
