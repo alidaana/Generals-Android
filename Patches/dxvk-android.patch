@@ -58,10 +58,10 @@ index 981b0003..f7c2b12b 100644
      // Log feature support info an extension list
      Logger::info(str::format("Device properties:"
 diff --git a/src/vulkan/vulkan_loader.cpp b/src/vulkan/vulkan_loader.cpp
-index 518efcb1..3ca3e70f 100644
+index 518efcb1..d34fa94d 100644
 --- a/src/vulkan/vulkan_loader.cpp
 +++ b/src/vulkan/vulkan_loader.cpp
-@@ -7,9 +7,85 @@
+@@ -7,9 +7,98 @@
  #include "../util/util_string.h"
  #include "../util/util_win32_compat.h"
  
@@ -75,6 +75,7 @@ index 518efcb1..3ca3e70f 100644
 +// untouched; the app (SDL3Main.cpp) sets the three env vars below before we run.
 +#include <cstdlib>
 +#include <dlfcn.h>
++#include <unistd.h>
 +
 +namespace {
 +  // Mirror of adrenotools/priv.h ADRENOTOOLS_DRIVER_CUSTOM (bit 0). Redeclared here
@@ -91,6 +92,18 @@ index 518efcb1..3ca3e70f 100644
 +  // libhook_impl.so / libmain_hook.so); customDriverDir MUST be a private, non-sdcard
 +  // dir (the app's internal files dir) holding the copied Turnip .so.
 +  void* dxvkAndroidOpenTurnip() {
++    // GeneralsX @android - Turnip drives Adreno GPUs only: it talks to the
++    // /dev/kgsl-3d0 kernel node, which exists solely on Qualcomm SoCs. On any
++    // other GPU (e.g. Samsung Xclipse / Exynos) Turnip's .so still loads and
++    // exposes vkGetInstanceProcAddr, but vkEnumeratePhysicalDevices returns 0 ->
++    // DXVK reports "No adapters found" and the D3D8 layer indexes an empty
++    // vector (SIGSEGV). Skip Turnip when kgsl is absent so the loader falls
++    // through to the stock libvulkan.so, which is the device's real driver.
++    if (access("/dev/kgsl-3d0", F_OK) != 0) {
++      dxvk::Logger::warn("Vulkan: no Adreno kgsl node (/dev/kgsl-3d0); skipping Turnip, using stock libvulkan.so");
++      return nullptr;
++    }
++
 +    const char* hookLibDir     = std::getenv("GENERALSX_ADRENOTOOLS_HOOK_DIR");
 +    const char* customDriverDir  = std::getenv("GENERALSX_TURNIP_DRIVER_DIR");
 +    const char* customDriverName = std::getenv("GENERALSX_TURNIP_DRIVER_NAME");
