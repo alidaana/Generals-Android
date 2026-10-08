@@ -1,5 +1,9 @@
 plugins { id 'com.android.application' }
 
+// S25 build: CI builds number themselves (GitHub run number) so each APK is a
+// visible upgrade of the last ("1.04-s25.N" in App info); local builds stay 1.
+def gxBuildNumber = (System.getenv('GITHUB_RUN_NUMBER') ?: '1').toInteger()
+
 android {
     namespace 'com.generalsx.generalszh'
     compileSdk 34
@@ -7,12 +11,27 @@ android {
         applicationId project.findProperty('GX_APP_ID') ?: 'com.generalsx.generalszh'
         minSdk 29
         targetSdk 29   // sideload-only: keeps requestLegacyExternalStorage effective
-        versionCode 1
-        versionName "1.04"
+        versionCode gxBuildNumber
+        versionName "1.04-s25.${gxBuildNumber}"
         ndk { abiFilters 'arm64-v8a' }
     }
+    // S25 build: a fixed debug key checked into the repo. CI runners are fresh
+    // machines that would otherwise generate a new random debug key per build, and
+    // Android refuses to update an app signed with a different key — every new APK
+    // would need an uninstall first. Debug-only, sideload-only; not a release key.
+    signingConfigs {
+        debug {
+            storeFile file('debug.keystore')
+            storePassword 'android'
+            keyAlias 'androiddebugkey'
+            keyPassword 'android'
+        }
+    }
     buildTypes {
-        debug { debuggable true }
+        debug {
+            debuggable true
+            signingConfig signingConfigs.debug
+        }
     }
     // GeneralsX @build FadiLabib 07/07/2026 - adrenotools REQUIRES legacy packaging.
     // With the modern (default) packaging Android leaves native libs compressed in

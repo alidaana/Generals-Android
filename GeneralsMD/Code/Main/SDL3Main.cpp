@@ -57,6 +57,12 @@
 #include <dlfcn.h>
 #include <sys/stat.h>
 #include <fcntl.h>
+// GeneralsX @feature S25 08/10/2026 On-device session log + crash report.
+#include <signal.h>
+#include <ucontext.h>
+#include <unwind.h>
+#include <sys/prctl.h>
+#include <sys/system_properties.h>
 #endif
 #endif
 #include <cstdlib>
@@ -148,6 +154,91 @@ static bool gxIsBootTraceSpam(const char *line)
 	    || strncmp(line, "[GX-ISSUE144]", 13) == 0;
 }
 
+// GeneralsX @feature S25 08/10/2026 On-device session log + crash report.
+// Reading logcat needs adb and a computer. So the pump below also mirrors every
+// line it forwards into /sdcard/GeneralsZH/generals-log.txt (the previous session
+// is kept as generals-log-prev.txt), and gxInstallCrashHandler() appends the
+// signal, fault address, thread and a backtrace when the process dies. A player
+// can then send the file straight from the phone. Per-frame spam is dropped and
+// the file is capped at 8 MB (error lines and the crash report still land past
+// the cap, since the tail of a dying session is the point of the file).
+static const char *GX_LOG_PATH = "/sdcard/GeneralsZH/generals-log.txt";
+static const char *GX_LOG_PREV_PATH = "/sdcard/GeneralsZH/generals-log-prev.txt";
+static const size_t GX_LOG_CAP = 8u * 1024u * 1024u;
+static int s_gxLogFd = -1;
+static int s_gxPumpReadFd = -1;
+static size_t s_gxLogWritten = 0;
+
+static bool gxIsErrorLine(const char *line)
+{
+	while (*line == ' ' || *line == '\t') ++line;
+	return strncmp(line, "err:", 4) == 0
+	    || strncmp(line, "ERROR", 5) == 0
+	    || strncmp(line, "FATAL", 5) == 0;
+}
+
+// Append raw bytes to the session log. important=true bypasses the size cap.
+static void gxLogFileWrite(const char *buf, size_t len, bool important)
+{
+	if (s_gxLogFd < 0 || len == 0) {
+		return;
+	}
+	if (s_gxLogWritten >= GX_LOG_CAP && !important) {
+		static bool s_capMarked = false;
+		if (!s_capMarked) {
+			s_capMarked = true;
+			static const char mark[] = "[log capped: only errors are recorded from here]\n";
+			write(s_gxLogFd, mark, sizeof(mark) - 1);
+		}
+		return;
+	}
+	const ssize_t w = write(s_gxLogFd, buf, len);
+	if (w > 0) {
+		s_gxLogWritten += (size_t)w;
+	}
+}
+
+static void gxLogFileWriteLine(const char *line)
+{
+	const char *p = line;
+	while (*p == ' ' || *p == '\t') ++p;
+	// Same per-frame spam the iOS session log drops (DXVK's D3D8 per-call warns).
+	if (strncmp(p, "warn:  D3D8De", 13) == 0) {
+		return;
+	}
+	// One write per line, newline included, so a crash report written from
+	// another thread can't land between a line and its newline.
+	char buf[1100];
+	size_t len = strlen(line);
+	if (len > sizeof(buf) - 2) {
+		len = sizeof(buf) - 2;
+	}
+	memcpy(buf, line, len);
+	buf[len++] = '\n';
+	gxLogFileWrite(buf, len, gxIsErrorLine(line));
+}
+
+static void gxLogFileOpen()
+{
+	rename(GX_LOG_PATH, GX_LOG_PREV_PATH);
+	s_gxLogFd = open(GX_LOG_PATH, O_WRONLY | O_CREAT | O_TRUNC | O_APPEND, 0644);
+	if (s_gxLogFd < 0) {
+		return;  // no storage permission yet / folder missing: logcat only
+	}
+	char model[PROP_VALUE_MAX] = "?";
+	char release[PROP_VALUE_MAX] = "?";
+	char sdk[PROP_VALUE_MAX] = "?";
+	__system_property_get("ro.product.model", model);
+	__system_property_get("ro.build.version.release", release);
+	__system_property_get("ro.build.version.sdk", sdk);
+	char header[256];
+	const int n = snprintf(header, sizeof(header),
+	                       "Generals ZH session log - %s, Android %s (API %s)\n", model, release, sdk);
+	if (n > 0) {
+		gxLogFileWrite(header, (size_t)n, true);
+	}
+}
+
 static void *gxLogcatPump(void *arg)
 {
 	const int readFd = (int)(intptr_t)arg;
@@ -165,6 +256,7 @@ static void *gxLogcatPump(void *arg)
 				line[len] = '\0';
 				if (verbose || !gxIsBootTraceSpam(line)) {
 					__android_log_write(ANDROID_LOG_INFO, "GeneralsX", line);
+					gxLogFileWriteLine(line);
 				}
 				len = 0;
 				if (c != '\n') {
@@ -179,6 +271,7 @@ static void *gxLogcatPump(void *arg)
 		line[len] = '\0';
 		if (verbose || !gxIsBootTraceSpam(line)) {
 			__android_log_write(ANDROID_LOG_INFO, "GeneralsX", line);
+			gxLogFileWriteLine(line);
 		}
 	}
 	return nullptr;
@@ -189,6 +282,8 @@ static void *gxLogcatPump(void *arg)
 // captured too. Idempotent-safe: called once from main().
 static void gxRedirectStdioToLogcat()
 {
+	gxLogFileOpen();
+
 	int pipeFd[2];
 	if (pipe(pipeFd) != 0) {
 		return;  // best-effort; leave stdio as-is if the pipe can't be made
@@ -213,6 +308,7 @@ static void gxRedirectStdioToLogcat()
 	pthread_t pumpThread;
 	if (ok && pthread_create(&pumpThread, nullptr, gxLogcatPump, (void *)(intptr_t)pipeFd[0]) == 0) {
 		pthread_detach(pumpThread);
+		s_gxPumpReadFd = pipeFd[0];  // the crash handler drains what the pump hasn't read yet
 		close(pipeFd[1]);            // pump owns the read end; writer fd stays live via dup2'd 1/2
 		if (savedStdout != -1) close(savedStdout);
 		if (savedStderr != -1) close(savedStderr);
@@ -224,6 +320,170 @@ static void gxRedirectStdioToLogcat()
 		close(pipeFd[0]);
 		close(pipeFd[1]);
 	}
+}
+
+// GeneralsX @feature S25 08/10/2026 Crash report into the session log.
+// On a fatal signal, append to generals-log.txt: the log lines still sitting in
+// the pipe, the signal and fault address, the crashing thread, its registers'
+// pc/lr, a frame-pointer walk from the faulting context and an unwinder
+// backtrace (library + offset + symbol, symbolizable against the APK's libs).
+// Then restore the previous handler (Android's debuggerd, which still writes
+// its tombstone) and let the signal reach it. Not strictly async-signal-safe
+// (snprintf/dladdr/unwinder), which is acceptable for a last-gasp report.
+static const int s_gxCrashSignals[] = { SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGABRT, SIGTRAP };
+static const int GX_CRASH_SIGNAL_COUNT = (int)(sizeof(s_gxCrashSignals) / sizeof(s_gxCrashSignals[0]));
+static struct sigaction s_gxOldSigActions[sizeof(s_gxCrashSignals) / sizeof(s_gxCrashSignals[0])];
+static volatile sig_atomic_t s_gxInCrash = 0;
+
+static void gxCrashWrite(const char *s)
+{
+	gxLogFileWrite(s, strlen(s), true);
+}
+
+static void gxCrashWriteFrame(int idx, const char *tag, uintptr_t pc)
+{
+	char out[512];
+	Dl_info info;
+	if (pc != 0 && dladdr(reinterpret_cast<void *>(pc), &info) != 0 && info.dli_fname != nullptr) {
+		const char *base = strrchr(info.dli_fname, '/');
+		base = base ? base + 1 : info.dli_fname;
+		const unsigned long off = (unsigned long)(pc - reinterpret_cast<uintptr_t>(info.dli_fbase));
+		if (info.dli_sname != nullptr) {
+			snprintf(out, sizeof(out), "  #%02d %s %08lx  %s (%s+%lu)\n", idx, tag, off, base,
+			         info.dli_sname, (unsigned long)(pc - reinterpret_cast<uintptr_t>(info.dli_saddr)));
+		} else {
+			snprintf(out, sizeof(out), "  #%02d %s %08lx  %s\n", idx, tag, off, base);
+		}
+	} else {
+		snprintf(out, sizeof(out), "  #%02d %s %016lx  ???\n", idx, tag, (unsigned long)pc);
+	}
+	gxCrashWrite(out);
+}
+
+struct GxUnwindState {
+	int depth;
+};
+
+static _Unwind_Reason_Code gxUnwindFrame(struct _Unwind_Context *ctx, void *arg)
+{
+	GxUnwindState *st = static_cast<GxUnwindState *>(arg);
+	const uintptr_t pc = _Unwind_GetIP(ctx);
+	if (pc == 0) {
+		return _URC_END_OF_STACK;
+	}
+	gxCrashWriteFrame(st->depth++, "pc", pc);
+	return st->depth >= 48 ? _URC_END_OF_STACK : _URC_NO_REASON;
+}
+
+static const char *gxSignalName(int sig)
+{
+	switch (sig) {
+	case SIGSEGV: return "SIGSEGV";
+	case SIGBUS:  return "SIGBUS";
+	case SIGILL:  return "SIGILL";
+	case SIGFPE:  return "SIGFPE";
+	case SIGABRT: return "SIGABRT";
+	case SIGTRAP: return "SIGTRAP";
+	default:      return "signal";
+	}
+}
+
+static void gxCrashHandler(int sig, siginfo_t *info, void *ucv)
+{
+	if (!s_gxInCrash) {
+		s_gxInCrash = 1;
+
+		// 1) Log lines the pump thread hasn't consumed yet (the last words).
+		if (s_gxPumpReadFd >= 0) {
+			const int fl = fcntl(s_gxPumpReadFd, F_GETFL);
+			if (fl != -1 && fcntl(s_gxPumpReadFd, F_SETFL, fl | O_NONBLOCK) != -1) {
+				char buf[4096];
+				ssize_t n;
+				int rounds = 0;
+				while (rounds++ < 64 && (n = read(s_gxPumpReadFd, buf, sizeof(buf))) > 0) {
+					gxLogFileWrite(buf, (size_t)n, true);
+				}
+			}
+		}
+
+		// 2) What, where, which thread.
+		char out[512];
+		char thread[17] = "?";
+		prctl(PR_GET_NAME, thread, 0, 0, 0);
+		if (info != nullptr && info->si_code > 0) {
+			snprintf(out, sizeof(out),
+			         "\n*** CRASH: %s (signal %d, code %d), fault addr %p, thread %d '%s'\n",
+			         gxSignalName(sig), sig, info->si_code, info->si_addr, (int)gettid(), thread);
+		} else {
+			snprintf(out, sizeof(out),
+			         "\n*** CRASH: %s (signal %d, raised by pid %d), thread %d '%s'\n",
+			         gxSignalName(sig), sig, info ? (int)info->si_pid : 0, (int)gettid(), thread);
+		}
+		gxCrashWrite(out);
+
+		// 3) Faulting pc/lr, then walk the frame-pointer chain from the faulting
+		// context (works without unwinding through the signal trampoline).
+		if (ucv != nullptr) {
+			const ucontext_t *uc = static_cast<const ucontext_t *>(ucv);
+			const uintptr_t pc = (uintptr_t)uc->uc_mcontext.pc;
+			const uintptr_t lr = (uintptr_t)uc->uc_mcontext.regs[30];
+			const uintptr_t sp = (uintptr_t)uc->uc_mcontext.sp;
+			uintptr_t fp = (uintptr_t)uc->uc_mcontext.regs[29];
+			gxCrashWrite("backtrace (frame pointers):\n");
+			gxCrashWriteFrame(0, "pc", pc);
+			gxCrashWriteFrame(1, "lr", lr);
+			int idx = 2;
+			uintptr_t prev = sp;
+			while (idx < 40 && fp != 0 && (fp & 0xF) == 0 && fp >= prev && fp - sp < 8u * 1024u * 1024u) {
+				const uintptr_t *frame = reinterpret_cast<const uintptr_t *>(fp);
+				const uintptr_t ret = frame[1];
+				if (ret == 0) {
+					break;
+				}
+				gxCrashWriteFrame(idx++, "fp", ret);
+				prev = fp + 16;
+				fp = frame[0];
+			}
+		}
+
+		// 4) Unwinder backtrace (CFI-based: covers code built without frame pointers).
+		gxCrashWrite("backtrace (unwinder, starts inside the crash handler):\n");
+		GxUnwindState st = { 0 };
+		_Unwind_Backtrace(gxUnwindFrame, &st);
+		gxCrashWrite("*** end of crash report ***\n");
+	}
+
+	// Hand the signal to the previous handler (debuggerd -> tombstone + system dialog).
+	for (int i = 0; i < GX_CRASH_SIGNAL_COUNT; ++i) {
+		if (s_gxCrashSignals[i] == sig) {
+			sigaction(sig, &s_gxOldSigActions[i], nullptr);
+			break;
+		}
+	}
+	if (info == nullptr || info->si_code <= 0) {
+		raise(sig);  // sent by kill/abort: re-send; a hardware fault re-triggers on return
+	}
+}
+
+static void gxInstallCrashHandler()
+{
+	if (s_gxLogFd < 0) {
+		return;  // nowhere to write the report
+	}
+	static char s_altStack[64 * 1024];
+	stack_t ss = {};
+	ss.ss_sp = s_altStack;
+	ss.ss_size = sizeof(s_altStack);
+	sigaltstack(&ss, nullptr);  // main thread: survives a stack-overflow SIGSEGV
+
+	struct sigaction sa = {};
+	sa.sa_sigaction = gxCrashHandler;
+	sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
+	sigemptyset(&sa.sa_mask);
+	for (int i = 0; i < GX_CRASH_SIGNAL_COUNT; ++i) {
+		sigaction(s_gxCrashSignals[i], &sa, &s_gxOldSigActions[i]);
+	}
+	fprintf(stderr, "INFO: crash reports go to %s\n", GX_LOG_PATH);
 }
 
 // GeneralsX @feature FadiLabib 07/07/2026 Stage the bundled Mesa Turnip driver and
@@ -507,6 +767,9 @@ int main(int argc, char* argv[])
 	// before any diagnostic below, so the whole on-device run is visible via
 	// `adb logcat -s GeneralsX` (Android otherwise discards app stdio).
 	gxRedirectStdioToLogcat();
+	// GeneralsX @feature S25 08/10/2026 ...and into /sdcard/GeneralsZH/generals-log.txt,
+	// with a crash report appended on a fatal signal (see gxInstallCrashHandler).
+	gxInstallCrashHandler();
 
 	// GeneralsX @feature FadiLabib 06/07/2026 Android bootstrap.
 	// The engine resolves ALL game data relative to the working directory
