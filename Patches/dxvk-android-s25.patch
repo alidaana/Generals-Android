@@ -1,0 +1,360 @@
+diff --git a/src/d3d8/d3d8_device_child.h b/src/d3d8/d3d8_device_child.h
+index 598ce0b1..794564f2 100644
+--- a/src/d3d8/d3d8_device_child.h
++++ b/src/d3d8/d3d8_device_child.h
+@@ -34,7 +34,7 @@ namespace dxvk {
+       uint32_t oldRefCount, refCount;
+ 
+       do {
+-        oldRefCount = this->m_refCount.load(std::memory_order_acquire);
++        oldRefCount = this->m_refCount.load();
+ 
+         // clamp value to 0 to prevent underruns
+         if (unlikely(!oldRefCount))
+@@ -42,10 +42,7 @@ namespace dxvk {
+ 
+         refCount = oldRefCount - 1;
+ 
+-      } while (!this->m_refCount.compare_exchange_weak(oldRefCount,
+-                                                       refCount,
+-                                                       std::memory_order_release,
+-                                                       std::memory_order_acquire));
++      } while (!this->m_refCount.compare_exchange_weak(oldRefCount, refCount));
+ 
+       if (unlikely(!refCount)) {
+         auto* pDevice = GetDevice();
+@@ -80,4 +77,4 @@ namespace dxvk {
+ 
+   };
+ 
+-}
+\ No newline at end of file
++}
+diff --git a/src/d3d9/d3d9_device_child.h b/src/d3d9/d3d9_device_child.h
+index 0866c7d8..f8e49928 100644
+--- a/src/d3d9/d3d9_device_child.h
++++ b/src/d3d9/d3d9_device_child.h
+@@ -28,7 +28,7 @@ namespace dxvk {
+       uint32_t oldRefCount, refCount;
+ 
+       do {
+-        oldRefCount = this->m_refCount.load(std::memory_order_acquire);
++        oldRefCount = this->m_refCount.load();
+ 
+         // clamp value to 0 to prevent underruns
+         if (unlikely(!oldRefCount))
+@@ -36,10 +36,7 @@ namespace dxvk {
+ 
+         refCount = oldRefCount - 1;
+ 
+-      } while (!this->m_refCount.compare_exchange_weak(oldRefCount,
+-                                                       refCount,
+-                                                       std::memory_order_release,
+-                                                       std::memory_order_acquire));
++      } while (!this->m_refCount.compare_exchange_weak(oldRefCount, refCount));
+ 
+       if (unlikely(!refCount)) {
+         auto* pDevice = GetDevice();
+@@ -74,4 +71,4 @@ namespace dxvk {
+ 
+   };
+ 
+-}
+\ No newline at end of file
++}
+diff --git a/src/dxvk/dxvk_cs.cpp b/src/dxvk/dxvk_cs.cpp
+index 5803780e..06f6aa48 100644
+--- a/src/dxvk/dxvk_cs.cpp
++++ b/src/dxvk/dxvk_cs.cpp
+@@ -149,7 +149,7 @@ namespace dxvk {
+       if (queue == DxvkCsQueue::HighPriority) {
+         // Worker will check this flag after executing any
+         // chunk without causing additional lock contention
+-        m_hasHighPrio.store(true, std::memory_order_release);
++        m_hasHighPrio.store(true);
+       }
+     }
+ 
+@@ -157,7 +157,7 @@ namespace dxvk {
+       std::unique_lock<dxvk::mutex> lock(m_counterMutex);
+ 
+       m_condOnSync.wait(lock, [this, queue, timeline] {
+-        return getCounter(queue).load(std::memory_order_acquire) >= timeline;
++        return getCounter(queue).load() >= timeline;
+       });
+     }
+   }
+@@ -166,7 +166,7 @@ namespace dxvk {
+   void DxvkCsThread::synchronize(uint64_t seq) {
+     // Avoid locking if we know the sync is a no-op, may
+     // reduce overhead if this is being called frequently
+-    if (seq > m_seqOrdered.load(std::memory_order_acquire)) {
++    if (seq > m_seqOrdered.load()) {
+       // We don't need to lock the queue here, if synchronization
+       // happens while another thread is submitting then there is
+       // an inherent race anyway
+@@ -177,7 +177,7 @@ namespace dxvk {
+ 
+       { std::unique_lock<dxvk::mutex> lock(m_counterMutex);
+         m_condOnSync.wait(lock, [this, seq] {
+-          return m_seqOrdered.load(std::memory_order_acquire) >= seq;
++          return m_seqOrdered.load() >= seq;
+         });
+       }
+ 
+@@ -222,7 +222,7 @@ namespace dxvk {
+           std::swap(ordered, m_queueOrdered.queue);
+           std::swap(highPrio, m_queueHighPrio.queue);
+ 
+-          m_hasHighPrio.store(false, std::memory_order_release);
++          m_hasHighPrio.store(false);
+         }
+ 
+         size_t orderedIndex = 0u;
+@@ -231,14 +231,14 @@ namespace dxvk {
+         while (highPrioIndex < highPrio.size() || orderedIndex < ordered.size()) {
+           // Re-fill local high-priority queue if the app has queued anything up
+           // in the meantime, we want to reduce possible synchronization delays.
+-          if (highPrioIndex >= highPrio.size() && m_hasHighPrio.load(std::memory_order_acquire)) {
++          if (highPrioIndex >= highPrio.size() && m_hasHighPrio.load()) {
+             highPrio.clear();
+             highPrioIndex = 0u;
+ 
+             std::unique_lock<dxvk::mutex> lock(m_mutex);
+             std::swap(highPrio, m_queueHighPrio.queue);
+ 
+-            m_hasHighPrio.store(false, std::memory_order_release);
++            m_hasHighPrio.store(false);
+           }
+ 
+           // Drain high-priority queue first
+@@ -255,7 +255,7 @@ namespace dxvk {
+             std::lock_guard lock(m_counterMutex);
+ 
+             auto& counter = isHighPrio ? m_seqHighPrio : m_seqOrdered;
+-            counter.store(entry.seq, std::memory_order_release);
++            counter.store(entry.seq);
+ 
+             m_condOnSync.notify_one();
+           }
+diff --git a/src/dxvk/dxvk_cs.h b/src/dxvk/dxvk_cs.h
+index 2fff2f77..b4d98c39 100644
+--- a/src/dxvk/dxvk_cs.h
++++ b/src/dxvk/dxvk_cs.h
+@@ -566,7 +566,7 @@ namespace dxvk {
+      * \returns Sequence number of last executed chunk
+      */
+     uint64_t lastSequenceNumber() const {
+-      return m_seqOrdered.load(std::memory_order_acquire);
++      return m_seqOrdered.load();
+     }
+ 
+   private:
+diff --git a/src/dxvk/dxvk_memory.cpp b/src/dxvk/dxvk_memory.cpp
+index b6a61c6d..0b278d01 100644
+--- a/src/dxvk/dxvk_memory.cpp
++++ b/src/dxvk/dxvk_memory.cpp
+@@ -1005,6 +1005,9 @@ namespace dxvk {
+           allocation->m_sparsePageTable = pageTable.release();
+       } else {
+         // Just need a page table, but no memory
++        // GeneralsX @android S25 08/10/2026 - createAllocation uses the
++        // allocation pool, which must only be touched under m_mutex.
++        std::lock_guard lock(m_mutex);
+         allocation = createAllocation(pageTable.release(), allocationInfo);
+       }
+     }
+@@ -1085,7 +1088,17 @@ namespace dxvk {
+     const VkBufferCreateInfo&         createInfo,
+     const DxvkAllocationInfo&         allocationInfo,
+     const DxvkBufferImportInfo&       importInfo) {
+-    Rc<DxvkResourceAllocation> allocation = m_allocationPool.create(this, nullptr);
++    // GeneralsX @android S25 08/10/2026 - The allocation pool is not thread-safe;
++    // every other create/free runs under m_mutex. Creating here without it raced
++    // frees on the submission thread and corrupted the pool's free list (crash in
++    // createAllocation on a bogus free-list pointer, Galaxy S25 Ultra).
++    DxvkResourceAllocation* poolAllocation;
++
++    { std::lock_guard lock(m_mutex);
++      poolAllocation = m_allocationPool.create(this, nullptr);
++    }
++
++    Rc<DxvkResourceAllocation> allocation = poolAllocation;
+     allocation->m_flags.set(DxvkAllocationFlag::Imported);
+     allocation->m_resourceCookie = allocation->m_resourceCookie;
+     allocation->m_size = createInfo.size;
+@@ -1104,7 +1117,16 @@ namespace dxvk {
+     const VkImageCreateInfo&          createInfo,
+     const DxvkAllocationInfo&         allocationInfo,
+           VkImage                     imageHandle) {
+-    Rc<DxvkResourceAllocation> allocation = m_allocationPool.create(this, nullptr);
++    // GeneralsX @android S25 08/10/2026 - Lock the allocation pool; see
++    // importBufferResource. Swapchain images come through here every time
++    // the presenter recreates the swapchain.
++    DxvkResourceAllocation* poolAllocation;
++
++    { std::lock_guard lock(m_mutex);
++      poolAllocation = m_allocationPool.create(this, nullptr);
++    }
++
++    Rc<DxvkResourceAllocation> allocation = poolAllocation;
+     allocation->m_flags.set(DxvkAllocationFlag::Imported);
+     allocation->m_resourceCookie = allocation->m_resourceCookie;
+     allocation->m_image = imageHandle;
+diff --git a/src/dxvk/dxvk_memory.h b/src/dxvk/dxvk_memory.h
+index c432df0f..c58bdb08 100644
+--- a/src/dxvk/dxvk_memory.h
++++ b/src/dxvk/dxvk_memory.h
+@@ -511,7 +511,7 @@ namespace dxvk {
+      * \brief Increments reference count
+      */
+     force_inline void incRef() {
+-      m_useCount.fetch_add(1u, std::memory_order_acquire);
++      m_useCount.fetch_add(1u);
+     }
+ 
+     /**
+@@ -519,7 +519,11 @@ namespace dxvk {
+      * Frees allocation if necessary
+      */
+     force_inline void decRef() {
+-      if (unlikely(m_useCount.fetch_sub(1u, std::memory_order_acquire) == 1u))
++      // GeneralsX @android S25 08/10/2026 - Backport of upstream DXVK 8dc04230 /
++      // 3d0ac2e7: an acquire-only decrement lets this thread's earlier accesses
++      // to the allocation be reordered after the final release on weakly
++      // ordered CPUs (ARM), racing the free. Use sequential consistency.
++      if (unlikely(m_useCount.fetch_sub(1u) == 1u))
+         free();
+     }
+ 
+diff --git a/src/dxvk/dxvk_presenter.cpp b/src/dxvk/dxvk_presenter.cpp
+index 38b8a2d6..4db6bed5 100644
+--- a/src/dxvk/dxvk_presenter.cpp
++++ b/src/dxvk/dxvk_presenter.cpp
+@@ -7,6 +7,23 @@
+ 
+ namespace dxvk {
+ 
++  // GeneralsX @android S25 08/10/2026 - On a portrait-native phone the
++  // (landscape-locked) game presents with preTransform = IDENTITY while the
++  // surface reports a ROTATE_90/270 currentTransform, so the WSI returns
++  // VK_SUBOPTIMAL_KHR on every acquire and present. That is harmless (the
++  // compositor rotates the image), but treating it as "recreate" rebuilt the
++  // swapchain on every frame (~40 times a second on a Galaxy S25 Ultra), and
++  // each rebuild re-imported the swapchain images. Treat SUBOPTIMAL as success
++  // on Android; a real surface change still arrives as OUT_OF_DATE.
++  static inline bool isPresentStatusUsable(VkResult vr) {
++#ifdef __ANDROID__
++    return vr == VK_SUCCESS || vr == VK_SUBOPTIMAL_KHR;
++#else
++    return vr == VK_SUCCESS;
++#endif
++  }
++
++
+   const std::array<std::pair<VkColorSpaceKHR, VkColorSpaceKHR>, 2> Presenter::s_colorSpaceFallbacks = {{
+     { VK_COLOR_SPACE_EXTENDED_SRGB_LINEAR_EXT, VK_COLOR_SPACE_HDR10_ST2084_EXT },
+ 
+@@ -106,13 +123,13 @@ namespace dxvk {
+ 
+     // This is a normal occurence, but may be useful for
+     // debugging purposes in case WSI goes wrong somehow.
+-    if (m_acquireStatus != VK_SUCCESS && m_swapchain)
++    if (!isPresentStatusUsable(m_acquireStatus) && m_swapchain)
+       Logger::info(str::format("Presenter: Got ", m_acquireStatus, ", recreating swapchain"));
+ 
+     // If the swap chain is out of date, recreate it and retry. It
+     // is possible that we do not get a new swap chain here, e.g.
+     // because the window is minimized.
+-    if (m_acquireStatus != VK_SUCCESS || !m_swapchain) {
++    if (!isPresentStatusUsable(m_acquireStatus) || !m_swapchain) {
+       VkResult vr = recreateSwapChain();
+ 
+       if (vr == VK_NOT_READY && hasSwapchain)
+@@ -232,7 +249,7 @@ namespace dxvk {
+ 
+     // On a successful present, try to acquire next image already, in
+     // order to hide potential delays from the application thread.
+-    if (status == VK_SUCCESS) {
++    if (isPresentStatusUsable(status)) {
+       PresenterSync& nextSync = m_semaphores.at(m_frameIndex);
+       waitForSwapchainFence(nextSync);
+ 
+@@ -245,7 +262,7 @@ namespace dxvk {
+     // There is no guarantee that suboptimal state is returned by both functions.
+     std::lock_guard lock(m_surfaceMutex);
+ 
+-    if (status != VK_SUCCESS) {
++    if (!isPresentStatusUsable(status)) {
+       Logger::info(str::format("Presenter: Got ", status, ", recreating swapchain"));
+ 
+       m_dirtySwapchain = true;
+diff --git a/src/dxvk/dxvk_sparse.h b/src/dxvk/dxvk_sparse.h
+index 6897ea9d..31ccad24 100644
+--- a/src/dxvk/dxvk_sparse.h
++++ b/src/dxvk/dxvk_sparse.h
+@@ -469,7 +469,7 @@ namespace dxvk {
+      * as well as the use count for the given access.
+      */
+     force_inline void acquire(DxvkAccess access) {
+-      m_useCount.fetch_add(getIncrement(access), std::memory_order_acquire);
++      m_useCount.fetch_add(getIncrement(access));
+     }
+ 
+     /**
+@@ -480,7 +480,7 @@ namespace dxvk {
+      */
+     force_inline void release(DxvkAccess access) {
+       uint64_t increment = getIncrement(access);
+-      uint64_t remaining = m_useCount.fetch_sub(increment, std::memory_order_release);
++      uint64_t remaining = m_useCount.fetch_sub(increment);
+ 
+       if (unlikely(remaining == increment))
+         delete this;
+@@ -496,7 +496,7 @@ namespace dxvk {
+       uint64_t increment = getIncrement(to) - getIncrement(from);
+ 
+       if (increment)
+-        m_useCount.fetch_add(increment, std::memory_order_acq_rel);
++        m_useCount.fetch_add(increment);
+     }
+ 
+     /**
+@@ -510,7 +510,7 @@ namespace dxvk {
+      * \returns \c true if the resource is in use
+      */
+     force_inline bool isInUse(DxvkAccess access) const {
+-      return m_useCount.load(std::memory_order_acquire) >= getIncrement(access);
++      return m_useCount.load() >= getIncrement(access);
+     }
+ 
+     /**
+@@ -524,13 +524,12 @@ namespace dxvk {
+      */
+     Rc<DxvkPagedResource> tryAcquire() {
+       uint64_t increment = getIncrement(DxvkAccess::None);
+-      uint64_t refCount = m_useCount.load(std::memory_order_acquire);
++      uint64_t refCount = m_useCount.load();
+ 
+       do {
+         if (!refCount)
+           return nullptr;
+-      } while (!m_useCount.compare_exchange_strong( refCount,
+-        refCount + increment, std::memory_order_relaxed));
++      } while (!m_useCount.compare_exchange_strong(refCount, refCount + increment));
+ 
+       return Rc<DxvkPagedResource>::unsafeCreate(this);
+     }
+diff --git a/src/util/thread.h b/src/util/thread.h
+index 2c20c02e..a5177f23 100644
+--- a/src/util/thread.h
++++ b/src/util/thread.h
+@@ -47,7 +47,7 @@ namespace dxvk {
+     ThreadProc            proc;
+ 
+     void decRef() {
+-      if (refs.fetch_sub(1, std::memory_order_release) == 1)
++      if (refs.fetch_sub(1) == 1)
+         delete this;
+     }
+   };

@@ -332,6 +332,29 @@ elseif(CMAKE_SYSTEM_NAME STREQUAL "Android" OR ANDROID)
     message(STATUS "DXVK Android: Patches/dxvk-android.patch already applied")
   endif()
 
+  # GeneralsX @android S25 08/10/2026 - Follow-up DXVK fixes, kept in their own
+  # patch so the pinned fork commit stays as-is (same idempotent apply as above):
+  # no swapchain rebuild on every VK_SUBOPTIMAL_KHR from rotated phone surfaces,
+  # a locked allocation pool for imported (swapchain) resources, and upstream's
+  # sequentially-consistent refcounts for ARM. See Patches/dxvk-android-s25.patch.
+  foreach(DXVK_EXTRA_PATCH IN ITEMS dxvk-android-s25.patch)
+    execute_process(
+      COMMAND git -C "${DXVK_LOCAL_FORK_DIR}" apply --reverse --check "${CMAKE_SOURCE_DIR}/Patches/${DXVK_EXTRA_PATCH}"
+      RESULT_VARIABLE DXVK_EXTRA_PATCH_ALREADY_APPLIED
+      ERROR_QUIET)
+    if(NOT DXVK_EXTRA_PATCH_ALREADY_APPLIED EQUAL 0)
+      execute_process(
+        COMMAND git -C "${DXVK_LOCAL_FORK_DIR}" apply "${CMAKE_SOURCE_DIR}/Patches/${DXVK_EXTRA_PATCH}"
+        RESULT_VARIABLE DXVK_EXTRA_PATCH_RESULT)
+      if(NOT DXVK_EXTRA_PATCH_RESULT EQUAL 0)
+        message(FATAL_ERROR "Failed to apply Patches/${DXVK_EXTRA_PATCH} to references/fadi-labib-dxvk")
+      endif()
+      message(STATUS "DXVK Android: applied Patches/${DXVK_EXTRA_PATCH}")
+    else()
+      message(STATUS "DXVK Android: Patches/${DXVK_EXTRA_PATCH} already applied")
+    endif()
+  endforeach()
+
   # Generate the meson cross file from the template, filling in the NDK bin dir
   # and the host glslang. The wrappers embed -target/--sysroot, so no arch/sysroot
   # flags are needed in [built-in options] (unlike the iOS file).
